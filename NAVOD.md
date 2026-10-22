@@ -19,10 +19,11 @@ Tento návod vás prevedie inštaláciou od nuly. Predpokladáme, že máte prip
 
 ## Krok 3. Nastavenie Apify tokenu
 
-1. Prepnite sa v prehliadači na kartu so zošitom (dialógy fungujú len tam).
-2. V Apps Script spustite funkciu `setupApifyKey()` (tlačidlo Spustiť nad editorom).
-3. V dialógu vložte svoj Apify API token a potvrďte.
-4. Token sa uloží bezpečne do Script Properties. Zostane tam aj po zmene kódu.
+1. Založte si bezplatný účet na Apify.com
+2. Prepnite sa v prehliadači na kartu so zošitom (dialógy fungujú len tam).
+3. V Apps Script spustite funkciu `setupApifyKey()` (tlačidlo Spustiť nad editorom).
+4. V dialógu vložte svoj Apify API token a potvrďte.
+5. Token sa uloží bezpečne do Script Properties. Zostane tam aj po zmene kódu.
 
 Ak sa dialóg nezobrazí, použite funkciu `setApifyKeyDirectly()`: vložte token na miesto `VLOZ_SEM_SVOJ_TOKEN`, spustite ju raz a token z kódu potom znova prepíšte na `VLOZ_SEM_SVOJ_TOKEN`. Token si spravujete sami, jeho obnova je na vašej strane.
 
