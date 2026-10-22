@@ -1,6 +1,6 @@
 # SEO Backlink Checker 
 
-Automatický monitor backlinks vo Google Sheets pomocou Google Apps Script.
+Automatický monitor spätných odkazov vo Google Sheets pomocou Google Apps Script.
 Kontroluje, či sú spätné odkazy stále nažive, či sa nezmenil typ (dofollow/nofollow),
 a dopĺňa Domain Score zdrojových domén cez Apify.
 
