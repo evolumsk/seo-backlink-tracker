@@ -1,4 +1,4 @@
-# Backlink Checker pre hoplo.sk
+# SEO Backlink Checker 
 
 Automatický monitor backlinks vo Google Sheets pomocou Google Apps Script.
 Kontroluje, či sú spätné odkazy stále nažive, či sa nezmenil typ (dofollow/nofollow),
@@ -95,3 +95,7 @@ Triggery sa vytvoria funkciou `createTriggers()`. Zopakované spustenie najprv z
 - Apify volanie je obmedzené na 200 unikátnych domín za beh. Zvyšok sa doplní pri ďalšom behu.
 - Kontrola odkazu čaká 400 až 700 ms medzi požiadavkami, aby sa zdrojové stránky nepreťažovali.
 - HTTP 429 a 503 sa niekoľkokrát zopakuje s čakaním, ostatné chyby sa zaznamenajú do poznámky.
+
+## Poznámky
+
+Force Run spúšťa tri kontroly za sebou a každá má interný limit 5 minút, ale Apps Script dovolí maximálne 6 minút na celý beh. Pri veľkom počte odkazov (približne nad 400 až 500 riadkov) môže Force Run pri tretej kontrole naraziť na limit. Skript si pozíciu zapamätá a doplní zvyšok pri ďalšom behu triggeru, alebo stačí Force Run spustiť znova
