@@ -1,19 +1,16 @@
 /**
- * Backlink Checker pre hoplo.sk - produkčná verzia
- * Tri listy: "High Quality", "Low Quality" a "Celkový prehľad" (automatický súhrn)
- *
- * A: ID | B: Zdrojová URL | C: Cieľová URL | D: Očakávaný anchor text | E: Typ odkazu
- * F: Agentúra/zdroj | G: Dátum získania | H: Status | I: HTTP kód | J: Posledná kontrola
- * K: Dátum zmeny statusu | L: Počet zlyhaní po sebe | M: Poznámka
- * N: Domain Score (Apify) | O: Posledná kontrola Domain Score
- *
- * Pred prvým použitím spusti raz: setupApifyKey()  -> zadáš Apify token cez dialóg
- * Rýchly test Apify pripojenia: testApifyDomainScore()
- * Nasadenie automatiky: createTriggers()
- * Okamžitý ručný beh všetkého: Force Run v menu "Backlink Checker" (pridá sa automaticky)
+ * Backlink Checker pre hoplo.sk - verzia 3 (opravená)
+ * Opravy oproti v2:
+ *  1. detegovaný typ odkazu (dofollow/nofollow/sponsored/ugc + rel atribúty) sa VŽDY zapíše
+ *     do stĺpca M, nielen pri rozpore so stĺpcom E
+ *  2. presné hľadanie <a> tagu - žiadny fallback na "doména niekde v HTML" bez varovania;
+ *     pri zhode len na doméne sa do poznámky napíše skutočný href (ochrana pred false positive)
+ *  3. Domain Score: pri zlyhaní Apify volania sa chyba zapíše VISIBLE do stĺpca N (ERR: ...)
+ *     a dátum sa NEzapíše, takže sa to pri ďalšom behu zopakuje
+ *  4. Apify endpoint prehodný na /v2/actors/ (legacy /acts/ alias)
+ *  5. rozpoznáva aj rel="sponsored" a rel="ugc", nie len nofollow
  */
 
-// === KONFIGURÁCIA LINK-CHECKERA ===
 const COL = {
   SOURCE_URL: 2, TARGET_URL: 3, ANCHOR: 4, TYPE: 5, AGENCY: 6, PURCHASE_DATE: 7,
   STATUS: 8, HTTP_CODE: 9, LAST_CHECK: 10, STATUS_CHANGED: 11, FAIL_COUNT: 12, NOTE: 13,
@@ -26,20 +23,13 @@ const MAX_RUNTIME_MS = 5 * 60 * 1000;
 const LOST_AFTER_FAILS = 2;
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
-// Listy so zdrojovými dátami (High Quality + Low Quality)
 const DATA_SHEETS = ['High Quality', 'Low Quality'];
-
-// Automatický súhrnný list, ktorý sa prebuduje po každom behu
 const OVERVIEW_SHEET = 'Celkový prehľad';
 
 // =====================================================================
-// === MENU + FORCE RUN (okamžitý ručný beh) ===
+// === MENU + FORCE RUN ===
 // =====================================================================
 
-/**
- * Menu sa vytvorí automaticky pri každom otvorení zošita.
- * Force Run ignoruje čakacie intervaly a spustí všetky kontroly naraz.
- */
 function onOpen() {
   SpreadsheetApp.getUi().createMenu('Backlink Checker')
     .addItem('▶ Force Run (všetko teraz)', 'forceRunAll')
@@ -55,12 +45,6 @@ function onOpen() {
     .addToUi();
 }
 
-/**
- * Force Run: okamžitý kompletný beh všetkých kontrol.
- * Vymaže uložené pozície obnovy (resume), preskočí 30-dňovú ochranu
- * Domain Score a spustí High Quality + Low Quality + Domain Score + prehľad.
- * Po skončení zobrazí stručné súhrnné hlásenie.
- */
 function forceRunAll() {
   const ui = SpreadsheetApp.getUi();
   const confirmed = ui.alert(
@@ -74,20 +58,12 @@ function forceRunAll() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   ss.toast('Force Run sa spustil, kontrolujem odkazy...', 'Backlink Checker', 30);
 
-  // 1. Vyčisti resume pozície, aby sa začalo od začiatku
   clearResumeKeys();
-
-  // 2. Kontrola odkazov
   checkHighQuality();
   checkLowQuality();
-
-  // 3. Domain Score bez ohľadu na 30-dňový interval
   checkDomainScores(true);
-
-  // 4. Prebuduj súhrnný list
   refreshOverview();
 
-  // 5. Súhrn pre používateľa
   const summary = buildRunSummary(ss);
   ss.toast('Force Run dokončený.', 'Backlink Checker', 30);
   ui.alert('Force Run dokončený', summary, ui.ButtonSet.OK);
@@ -117,7 +93,7 @@ function buildRunSummary(ss) {
   return 'Live: ' + live + '   Lost: ' + lost + '   Overuje sa: ' + checking + '   Error: ' + error;
 }
 
-// === VSTUPNÉ FUNKCIE PRE LINK-CHECK (volajú sa z triggerov a menu) ===
+// === VSTUPNÉ FUNKCIE PRE LINK-CHECK ===
 function checkHighQuality() {
   runSheet('High Quality', 3);
 }
@@ -161,7 +137,7 @@ function processSheet(sheet, cfg, startTime) {
     const row = data[i];
     const sourceUrl = row[COL.SOURCE_URL - 1];
     const targetUrl = row[COL.TARGET_URL - 1];
-    const expectedType = (row[COL.TYPE - 1] || '').toString().toLowerCase();
+    const expectedType = (row[COL.TYPE - 1] || '').toString().toLowerCase().trim();
     const prevStatus = row[COL.STATUS - 1];
     const prevFailCount = Number(row[COL.FAIL_COUNT - 1]) || 0;
 
@@ -203,7 +179,13 @@ function processSheet(sheet, cfg, startTime) {
   refreshOverview();
 }
 
+// =====================================================================
+// === KONTROLA JEDNOTLIVÉHO ODKAZU (opravená verzia) ===
+// =====================================================================
+
 function checkSingleBacklink(sourceUrl, targetUrl, expectedType, maxRetries) {
+  sourceUrl = sanitizeUrl(sourceUrl);
+  targetUrl = sanitizeUrl(targetUrl);
   const targetDomain = extractDomain(targetUrl);
   let lastError = null;
 
@@ -230,21 +212,31 @@ function checkSingleBacklink(sourceUrl, targetUrl, expectedType, maxRetries) {
       }
 
       const html = response.getContentText();
-      const linkFound = html.indexOf(targetUrl) !== -1 ||
-                         html.toLowerCase().indexOf(targetDomain.toLowerCase()) !== -1;
+      const info = extractLinkInfo(html, targetUrl, targetDomain);
 
-      if (!linkFound) {
+      if (info.found === 'no') {
         return { status: 'Lost', httpCode: code, note: 'Odkaz na stránke už nie je' };
       }
 
-      const detectedType = detectLinkType(html, targetUrl);
-      const typeMismatch = detectedType && expectedType && detectedType !== expectedType;
+      // Typ sa vždy zapíše do poznámky (aj keď stĺpec E je prázdny)
+      let note = info.type + (info.rel ? ' (rel="' + info.rel + '")' : ' (bez rel)');
+
+      // Varovanie pri zhode len na doméne - presná cieľová URL sa nenašla
+      if (info.found === 'domain') {
+        note = '⚠ URL sa nezhoduje presne - na stránke je ' + info.href + ' | ' + note;
+      }
+
+      let typeMismatch = false;
+      if (expectedType && info.type !== expectedType) {
+        typeMismatch = true;
+        note = 'ZMENA TYPU: očakávané "' + expectedType + '", je "' + info.type + '" | ' + note;
+      }
 
       return {
         status: 'Live',
         httpCode: code,
-        note: typeMismatch ? 'Typ zmenený na ' + detectedType : '',
-        detectedType: detectedType,
+        note: note,
+        detectedType: info.type,
         typeMismatch: typeMismatch
       };
 
@@ -257,19 +249,53 @@ function checkSingleBacklink(sourceUrl, targetUrl, expectedType, maxRetries) {
   return { status: 'Error', httpCode: 'N/A', note: 'Zlyhalo po ' + maxRetries + ' pokusoch: ' + lastError };
 }
 
-function detectLinkType(html, targetUrl) {
-  try {
-    const regex = new RegExp('<a\\b[^>]*href=["\'][^"\']*' + escapeRegex(targetUrl) + '[^"\']*["\'][^>]*>', 'i');
-    const match = html.match(regex);
-    if (!match) return null;
-    return /rel=["'][^"']*nofollow/i.test(match[0]) ? 'nofollow' : 'dofollow';
-  } catch (e) {
-    return null;
+/**
+ * Nájde <a> tag odkazujúci na targetUrl. Presná zhoda (po normalizácii
+ * trailing lomítok a veľkých písmen) = 'exact'; zhoda len na doméne = 'domain'.
+ * Vracia aj celý rel atribút, takže vidíte sponsored/ugc/nofollow kombinácie.
+ */
+function extractLinkInfo(html, targetUrl, targetDomain) {
+  const norm = function (s) {
+    return s.replace(/^https?:\/\//i, '').replace(/\/+$/, '').toLowerCase();
+  };
+  const targetNorm = norm(targetUrl);
+  const domainNorm = norm(targetDomain);
+
+  const anchorRe = /<a\b[^>]*href=["']([^"']*)["'][^>]*>/gi;
+  let m;
+  let domainMatch = null;
+
+  while ((m = anchorRe.exec(html)) !== null) {
+    const href = m[1];
+    const hrefNorm = norm(href);
+
+    if (hrefNorm === targetNorm) {
+      return buildInfo(m[0], href, 'exact');
+    }
+    // zhoda na doméne, ale iná cesta (napr. odkazuje len na homepage namiesto /kontakt)
+    if (!domainMatch &&
+        (hrefNorm === domainNorm || hrefNorm.indexOf(domainNorm + '/') === 0)) {
+      domainMatch = buildInfo(m[0], href, 'domain');
+    }
   }
+  return domainMatch || { found: 'no', type: null, rel: '', href: '' };
 }
 
-function escapeRegex(str) {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+function buildInfo(tag, href, found) {
+  const relMatch = tag.match(/rel=["']([^"']*)["']/i);
+  const rel = relMatch ? relMatch[1].toLowerCase() : '';
+  let type = 'dofollow';
+  if (/\bsponsored\b/.test(rel)) type = 'sponsored';
+  else if (/\bnofollow\b/.test(rel)) type = 'nofollow';
+  else if (/\bugc\b/.test(rel)) type = 'ugc';
+  return { found: found, type: type, rel: rel, href: href };
+}
+
+function sanitizeUrl(url) {
+  let u = url.toString().trim();
+  u = u.replace(/[\u200B-\u200D\uFEFF]/g, '');
+  u = u.replace(/\s+/g, '%20');
+  return u;
 }
 
 function extractDomain(url) {
@@ -285,14 +311,9 @@ function sendDigest(sheetName, lostLinks, typeChanges) {
 }
 
 // =====================================================================
-// === CELKOVÝ PREHĽAD (automatický súhrn Low + High Quality) ===
+// === CELKOVÝ PREHĽAD ===
 // =====================================================================
 
-/**
- * Prebuduje list "Celkový prehľad" z aktuálneho obsahu oboch zdrojových listov.
- * Volá sa automaticky po každej kontrole odkazov, dá sa spustiť aj ručne z menu.
- * Starý obsah sa celý prepíše, takže prehľad je vždy aktuálny.
- */
 function refreshOverview() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   let overview = ss.getSheetByName(OVERVIEW_SHEET);
@@ -328,7 +349,6 @@ function refreshOverview() {
     });
   });
 
-  // Vymaž starý obsah a zapíš nový
   overview.clearContents();
   overview.getRange(1, 1, rows.length, header.length).setValues(rows);
   overview.getRange(1, 1, 1, header.length).setFontWeight('bold');
@@ -337,17 +357,14 @@ function refreshOverview() {
 }
 
 // =====================================================================
-// === APIFY DOMAIN SCORE (zhorex/domain-authority-checker) ===
+// === APIFY DOMAIN SCORE (opravená verzia - chyby viditeľné v hárku) ===
 // =====================================================================
+
 const APIFY_ACTOR = 'zhorex~domain-authority-checker';
 const APIFY_SHEETS = ['High Quality', 'Low Quality'];
-const DOMAIN_SCORE_RECHECK_DAYS = 30;   // skóre sa nemení rýchlo, netreba kontrolovať častejšie
-const MAX_DOMAINS_PER_APIFY_RUN = 200;  // poistka pred 6-min limitom Apps Scriptu aj Apify sync timeoutom
+const DOMAIN_SCORE_RECHECK_DAYS = 30;
+const MAX_DOMAINS_PER_APIFY_RUN = 200;
 
-/**
- * Spusti RAZ ručne pred prvým použitím. Otvorí dialóg, kam zadáš Apify API token.
- * Token sa uloží bezpečne do Script Properties - nikdy nie je súčasťou textu skriptu.
- */
 function setupApifyKey() {
   const ui = SpreadsheetApp.getUi();
   const response = ui.prompt('Zadaj Apify API token', 'Nájdeš ho v Apify Console > Settings > Integrations.', ui.ButtonSet.OK_CANCEL);
@@ -360,39 +377,32 @@ function setupApifyKey() {
   }
 }
 
-/**
- * ALTERNATÍVA bez dialógu - ak sa vám ui.prompt() nezobrazuje (zvykne sa to stať,
- * keď skript spúšťate priamo z Apps Script editora a nie je aktívna karta so Sheetom).
- * Vložte token na miesto 'VLOZ_SEM_SVOJ_TOKEN', spustite RAZ, potom môžete text kľúča
- * pokojne zmazať z riadku, token už bude bezpečne uložený v Script Properties.
- * Token si spravujete sami, jeho obnova je na vašej strane.
- */
 function setApifyKeyDirectly() {
   PropertiesService.getScriptProperties().setProperty('APIFY_API_TOKEN', 'VLOZ_SEM_SVOJ_TOKEN');
   Logger.log('Token uložený.');
 }
 
 /**
- * Rýchly test - spustite ručne z editora a pozrite Logy (Zobraziť > Logy).
- * Overí, že token aj actor fungujú, na dvoch testovacích doménach.
+ * Test - okrem logov vypíše výsledok aj do dialógu, aby ste nemuseli hľadať Logy.
  */
 function testApifyDomainScore() {
   const token = PropertiesService.getScriptProperties().getProperty('APIFY_API_TOKEN');
   if (!token) {
-    Logger.log('Chýba APIFY_API_TOKEN - spustite najprv setupApifyKey().');
+    SpreadsheetApp.getUi().alert('Chýba APIFY_API_TOKEN - spustite najprv setupApifyKey().');
     return;
   }
   try {
     const result = callApifyDomainScore(['hoplo.sk', 'google.com'], token);
-    Logger.log('Apify test OK, výsledok:');
-    Logger.log(JSON.stringify(result, null, 2));
+    Logger.log('Apify test OK: ' + JSON.stringify(result));
+    SpreadsheetApp.getUi().alert('Apify test OK:\n' + JSON.stringify(result, null, 2));
   } catch (e) {
     Logger.log('Apify test ZLYHAL: ' + e.message);
+    SpreadsheetApp.getUi().alert('Apify test ZLYHAL:\n' + e.message);
   }
 }
 
 function callApifyDomainScore(domains, token) {
-  const url = 'https://api.apify.com/v2/acts/' + APIFY_ACTOR +
+  const url = 'https://api.apify.com/v2/actors/' + APIFY_ACTOR +
     '/run-sync-get-dataset-items?token=' + encodeURIComponent(token);
 
   const payload = { domains: domains, maxConcurrency: 10, timeout: 15 };
@@ -406,26 +416,27 @@ function callApifyDomainScore(domains, token) {
 
   const code = response.getResponseCode();
   if (code !== 200 && code !== 201) {
-    throw new Error('Apify vrátilo HTTP ' + code + ': ' + response.getContentText().substring(0, 300));
+    throw new Error('Apify HTTP ' + code + ': ' + response.getContentText().substring(0, 300));
   }
   return JSON.parse(response.getContentText());
 }
 
 /**
- * Hlavná funkcia - skontroluje Domain Score pre unikátne zdrojové domény
- * z oboch listov naraz (šetrí volania) a zapíše ho do stĺpca N + dátum do O.
- * Preskočí domény, ktoré boli kontrolované v posledných DOMAIN_SCORE_RECHECK_DAYS dňoch.
- * Parameter force=true preskočí túto ochranu (používa ho Force Run).
+ * Hlavná funkcia - pri zlyhaní volania zapíše 'ERR: ...' do stĺpca N
+ * a NEzapíše dátum do O, takže sa domény pri ďalšom behu skontrolujú znova.
  */
 function checkDomainScores(force) {
   const token = PropertiesService.getScriptProperties().getProperty('APIFY_API_TOKEN');
   if (!token) {
+    SpreadsheetApp.getActiveSpreadsheet().toast(
+      'Domain Score preskočený - chýba APIFY_API_TOKEN. Spustite setupApifyKey().',
+      'Backlink Checker', 60);
     Logger.log('Chýba APIFY_API_TOKEN - spustite najprv setupApifyKey().');
     return;
   }
 
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheets = APIFY_SHEETS.map(name => ss.getSheetByName(name)).filter(s => s);
+  const sheets = APIFY_SHEETS.map(function (name) { return ss.getSheetByName(name); }).filter(function (s) { return s; });
   if (sheets.length === 0) {
     Logger.log('Nenašiel som listy High Quality / Low Quality.');
     return;
@@ -434,13 +445,13 @@ function checkDomainScores(force) {
   const domainToRows = {};
   const now = new Date();
 
-  sheets.forEach(sheet => {
+  sheets.forEach(function (sheet) {
     const lastRow = sheet.getLastRow();
     if (lastRow < START_ROW) return;
     const numRows = lastRow - START_ROW + 1;
     const data = sheet.getRange(START_ROW, 1, numRows, COL.DOMAIN_SCORE_CHECKED).getValues();
 
-    data.forEach((row, i) => {
+    data.forEach(function (row, i) {
       const rowIndex = START_ROW + i;
       const sourceUrl = row[COL.SOURCE_URL - 1];
       if (!sourceUrl) return;
@@ -463,7 +474,7 @@ function checkDomainScores(force) {
   }
   if (uniqueDomains.length > MAX_DOMAINS_PER_APIFY_RUN) {
     Logger.log('Pozor: ' + uniqueDomains.length + ' domén presahuje limit ' + MAX_DOMAINS_PER_APIFY_RUN +
-      ', kontrolujem len prvých ' + MAX_DOMAINS_PER_APIFY_RUN + '. Zvyšok sa doplní pri ďalšom behu.');
+      ', kontrolujem len prvých ' + MAX_DOMAINS_PER_APIFY_RUN + '.');
     uniqueDomains = uniqueDomains.slice(0, MAX_DOMAINS_PER_APIFY_RUN);
   }
 
@@ -471,20 +482,28 @@ function checkDomainScores(force) {
   try {
     results = callApifyDomainScore(uniqueDomains, token);
   } catch (e) {
-    Logger.log('Apify volanie zlyhalo, skúsim nabudúce: ' + e.message);
+    // OPRAVA: chyba sa zapíše viditeľne do hárku namiesto tichého logu
+    Logger.log('Apify volanie zlyhalo: ' + e.message);
+    uniqueDomains.forEach(function (domain) {
+      domainToRows[domain].forEach(function (ref) {
+        ref.sheet.getRange(ref.rowIndex, COL.DOMAIN_SCORE).setValue('ERR: ' + e.message.substring(0, 180));
+        // dátum do O sa NEzapíše - pri ďalšom behu sa to skúsi znova
+      });
+    });
+    ss.toast('Domain Score zlyhal: ' + e.message, 'Backlink Checker', 60);
     return;
   }
 
   const scoreByDomain = {};
-  (results || []).forEach(item => {
+  (results || []).forEach(function (item) {
     if (item && item.domain) scoreByDomain[item.domain] = item;
   });
 
   let okCount = 0;
-  uniqueDomains.forEach(domain => {
+  uniqueDomains.forEach(function (domain) {
     const item = scoreByDomain[domain];
     const rows = domainToRows[domain];
-    rows.forEach(ref => {
+    rows.forEach(function (ref) {
       if (item && typeof item.domainScore === 'number') {
         ref.sheet.getRange(ref.rowIndex, COL.DOMAIN_SCORE).setValue(item.domainScore);
         okCount++;
@@ -496,12 +515,14 @@ function checkDomainScores(force) {
   });
 
   Logger.log('Domain Score skontrolovaný pre ' + uniqueDomains.length + ' domén (' + okCount + ' úspešných).');
+  ss.toast('Domain Score: ' + okCount + '/' + uniqueDomains.length + ' domén úspešne.', 'Backlink Checker', 30);
   refreshOverview();
 }
 
 // =====================================================================
-// === TRIGGERY (spustite createTriggers() RAZ pre plné nasadenie) ===
+// === TRIGGERY ===
 // =====================================================================
+
 function createTriggers() {
   deleteTriggerFor('checkHighQuality');
   deleteTriggerFor('checkLowQuality');
